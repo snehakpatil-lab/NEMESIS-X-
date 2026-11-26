@@ -17,9 +17,10 @@ FastAPI + YOLO/ByteTrack + SQLite. Runs fully local; **no API key needed**.
 
 ## Deployment
 
-- **Render backend:** create a Blueprint from this repository and use `render.yaml`. Set
-  `NEMESIS_CORS_ORIGINS` to the exact Vercel site origin (for example
-  `https://your-site.vercel.app`, no path). Render's free filesystem is ephemeral; uploaded
+- **Render backend:** create a Blueprint from this repository and use `render.yaml`.
+  `NEMESIS_CORS_ORIGINS` defaults to `https://nemesisx2026.vercel.app`; set it to the exact
+  frontend origin(s), comma-separated and without paths, when deploying to another domain.
+  Render's free filesystem is ephemeral; uploaded
   videos and SQLite data can be lost on redeploy/restart. For persistent data, attach a paid
   Render disk and set `NEMESIS_DATA_DIR` to its mount path.
 - **Vercel frontend:** set the project root to this directory and the environment variable

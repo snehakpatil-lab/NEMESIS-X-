@@ -4,9 +4,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("NEMESIS_DATA_DIR") or ROOT / "data").expanduser()
 UPLOADS = DATA / "uploads"
 DB = DATA / "nemesis.db"
+_cors_origins = os.getenv("NEMESIS_CORS_ORIGINS", "").strip()
+if not _cors_origins:
+    _cors_origins = "https://nemesisx2026.vercel.app"
 CORS_ORIGINS = tuple(
     origin.strip().rstrip("/")
-    for origin in os.getenv("NEMESIS_CORS_ORIGINS", "").split(",")
+    for origin in _cors_origins.split(",")
     if origin.strip()
 )
 MODEL = os.getenv("NEMESIS_MODEL", "yolov8n.pt")   # downloaded on first run
