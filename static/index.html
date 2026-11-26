@@ -17,6 +17,7 @@ body.alt{--c:#8257FF;--b:rgba(130,87,255,.28)}
 #scan{position:absolute;left:0;right:0;height:2px;background:var(--c);box-shadow:0 0 30px var(--c);top:-5px;opacity:0}
 button{font:inherit;color:var(--t);background:rgba(0,229,255,.06);border:1px solid var(--b);border-radius:6px;padding:6px 12px;cursor:pointer}
 button:hover{border-color:var(--c);box-shadow:0 0 12px rgba(0,229,255,.25)}
+button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
 #skip{position:absolute;right:24px;bottom:24px;letter-spacing:.2em;font-size:11px}
 #app{position:relative;z-index:1;height:100%;display:grid;grid-template-rows:52px 1fr;opacity:0}
 #top{display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid var(--b);background:var(--p);backdrop-filter:blur(14px)}
@@ -83,16 +84,19 @@ input[type=text]{width:100%;background:#0a0f18;color:var(--t);border:1px solid v
 <span class="pill" id="pv">SESSION: NO VIDEO</span>
 <span class="pill" id="pg">GPU: UNAVAILABLE</span>
 <span class="sp"></span>
-<button id="th">Accent</button><button id="ab">Evidence Q&A</button><button id="st" data-go="config">Settings</button></header>
+<button id="th">Accent</button><button id="pdf" disabled title="Select a processed video to download a PDF report">PDF Report</button><button id="ab">Evidence Q&A</button><button id="st" data-go="config">Settings</button></header>
 <div id="main"><nav id="side"></nav><main id="view"></main></div>
 <aside id="ai"><h3 style="margin:0;color:var(--c);letter-spacing:.2em;font-size:11px">EVIDENCE Q&A</h3>
 <div id="msgs"><div class="m s">Answers summarize stored detections and motion cues from the selected video. Motion outliers are review clues, not confirmed incidents.</div></div>
 <input type="text" id="q" placeholder="What happened during this video?"></aside>
 </div>
 
+<script src="/runtime-config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 <script>
 const $=(s,r=document)=>r.querySelector(s);
+const API_BASE_URL=String(window.NEMESIS_API_BASE_URL||'').replace(/\/+$/,'');
+const apiUrl=path=>`${API_BASE_URL}${path}`;
 const S={video:null,log:[],backendOnline:false,pollTimer:null,lastDetectionFetch:0,detectionRequest:0,memoryOffset:0,spatialData:null};
 const E=(t,d)=>`<div class="empty"><em>${t}</em>${d||''}</div>`;
 const NO=(d)=>E('NO DATA',d||'Awaiting backend processing.');
@@ -147,7 +151,7 @@ V.video=`<h2>VIDEO ANALYSIS</h2><div class="sub">Long videos are sampled at up t
 <div id="ws"><div class="card"><h3>INPUT</h3><div id="drop">Drop MP4 / AVI / MOV here<br>or click to browse</div><input id="fi" type="file" accept=".mp4,.avi,.mov,video/*" hidden>
 <h3 style="margin-top:16px">LIBRARY</h3><div id="lib">${NO('No videos uploaded yet.')}</div>
 <h3 style="margin-top:16px">ANALYSIS</h3><div id="analysis-status" class="sub" style="margin:0 0 8px">Choose a video to upload it to the backend.</div><button id="analyze" disabled style="width:100%">Run analysis</button></div>
-<div class="card"><div class="stage"><video id="vp" playsinline></video><canvas id="ov"></canvas><div class="empty" id="ve"><em>NO VIDEO LOADED</em>Load a file to begin.</div></div>
+<div class="card"><div class="stage"><video id="vp" playsinline crossorigin="anonymous"></video><canvas id="ov"></canvas><div class="empty" id="ve"><em>NO VIDEO LOADED</em>Load a file to begin.</div></div>
 <div class="ctl"><button id="pp">Play</button><button id="fb">◂ Frame</button><button id="ff">Frame ▸</button>
 <input type="range" id="sk" min="0" max="1000" value="0"><span id="tm">0:00.00 / 0:00.00</span>
 <select id="sp"><option>0.25</option><option>0.5</option><option selected>1</option><option>1.5</option><option>2</option></select><button id="ss">Screenshot</button></div>
@@ -173,10 +177,10 @@ V.events=`<h2>TRACK EVENT TIMELINE</h2><div class="sub">Evidence-backed track bo
 V.memory=`<h2>TEMPORAL MEMORY</h2><div class="sub">Track intervals and timestamped detections stored by the backend. Select a row to jump to its video time.</div>
 <div class="card"><h3>MEMORY GRAPH · TRACK LIFESPANS</h3><div id="memory-summary">${NO('Select a processed video to load temporal memory.')}</div><div id="memory-graph"></div></div>
 <div class="card" style="margin-top:14px"><h3>CHRONOLOGICAL NAVIGATOR</h3><div id="memory-navigator">${NO('Select a processed video to browse observations.')}</div><div id="memory-pagination"></div></div>`;
-V.anomaly=`<h2>ANOMALY REVIEW</h2><div class="sub">Statistical and unsupervised model candidates use image-plane track data. These are review signals, not proof of unusual or harmful activity.</div>
+V.anomaly=`<h2>ANOMALY REVIEW</h2><div class="sub">Exploratory statistical and unsupervised candidates use image-plane track data. Small track cohorts can produce unstable flags. These are review signals, not proof of unusual or harmful activity.</div>
 <div class="card"><h3>STATISTICAL OUTLIERS</h3><div id="anomaly-method" class="sub">Select a processed video.</div><div id="statistical-anomalies">${NO('Select a processed video to calculate statistical outliers.')}</div></div>
 <div class="card" style="margin-top:14px"><h3>MODEL-GENERATED CANDIDATES</h3><div id="model-candidates">${NO('No separate anomaly model is configured.')}</div></div>
-<div class="card" style="margin-top:14px"><h3>HUMAN-REVIEWED CANDIDATES</h3><div id="human-reviewed">${NO('No candidates have been reviewed yet.')}</div></div>`;
+<div class="card" style="margin-top:14px"><h3>HUMAN REVIEW &amp; DECISIONS</h3><div id="human-reviewed">${NO('No candidates are available to review yet.')}</div></div>`;
 NAV.forEach(([id])=>view.insertAdjacentHTML('beforeend',`<section class="v" id="v-${id}">${V[id]}</section>`));
 
 function go(id){document.querySelectorAll('.v').forEach(e=>e.classList.toggle('on',e.id==='v-'+id));
@@ -203,7 +207,7 @@ document.addEventListener('click',async e=>{
  if(!button||!S.video||!S.video.id)return;
  button.disabled=true;
  try{
-  const response=await fetch(`/api/videos/${S.video.id}/anomalies/${encodeURIComponent(button.dataset.anomalyReview)}/review`,{
+  const response=await fetch(apiUrl(`/api/videos/${S.video.id}/anomalies/${encodeURIComponent(button.dataset.anomalyReview)}/review`),{
    method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({status:button.dataset.reviewStatus})
   });
@@ -214,6 +218,28 @@ document.addEventListener('click',async e=>{
 });
 $('#tg').onclick=()=>side.classList.toggle('col');
 $('#th').onclick=()=>document.body.classList.toggle('alt');
+const pdfButton=$('#pdf');
+pdfButton.onclick=async()=>{
+ if(!S.video||!S.video.id)return;
+ const videoId=S.video.id;
+ pdfButton.disabled=true;
+ try{
+  const response=await fetch(apiUrl(`/api/videos/${videoId}/report.pdf`));
+  if(!response.ok){
+   let detail='Could not generate the PDF report.';
+   try{const result=await response.json();detail=result.detail||detail}catch{}
+   throw new Error(detail);
+  }
+  const blob=await response.blob();
+  if(blob.type!=='application/pdf'||!blob.size)throw new Error('The backend returned an invalid PDF report.');
+  const url=URL.createObjectURL(blob),link=document.createElement('a');
+  link.href=url;link.download=`nemesis-x-video-${videoId}-report.pdf`;
+  document.body.appendChild(link);link.click();link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  log(`Downloaded PDF report for video #${videoId}.`);
+ }catch(error){log(`PDF report download failed: ${error.message}`)}
+ finally{pdfButton.disabled=!(S.video&&S.video.id&&S.video.status==='done')}
+};
 $('#ab').onclick=()=>$('#ai').classList.toggle('on');
 $('#q').onkeydown=async e=>{
  if(e.key!=='Enter'||!e.target.value.trim()||e.target.disabled)return;
@@ -223,7 +249,7 @@ $('#q').onkeydown=async e=>{
  const reply=document.createElement('div');reply.className='m s';reply.textContent='Checking stored observations…';messages.appendChild(reply);
  input.value='';input.disabled=true;messages.scrollTop=messages.scrollHeight;
  try{
-  const response=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+  const response=await fetch(apiUrl('/api/chat'),{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({question:question,video_id:S.video&&S.video.id?S.video.id:null})});
   const result=await response.json();
   if(!response.ok)throw new Error(result.detail||'Evidence query failed.');
@@ -245,7 +271,7 @@ function setAnalysisStatus(message){$('#analysis-status').textContent=message}
 function escapeHtml(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function loadSystemPerformance(){
  try{
-  const response=await fetch('/api/system');
+  const response=await fetch(apiUrl('/api/system'));
   const metrics=await response.json();
   if(!response.ok)throw new Error(metrics.detail||'System metrics request failed.');
   $('#sys-cpu').textContent=Number.isFinite(metrics.cpu_percent)?`${metrics.cpu_percent.toFixed(0)}%`:'N/A';
@@ -273,13 +299,13 @@ function renderLibrary(videos){
  $('#lib').innerHTML=videos.map(v=>`<button type="button" data-video-id="${Number(v.id)}" style="display:block;width:100%;margin-bottom:5px;text-align:left;overflow:hidden;text-overflow:ellipsis">#${Number(v.id)} · ${escapeHtml(v.name)} · ${escapeHtml(v.status)}${v.status==='processing'?` · ${Math.round((v.progress||0)*100)}%`:''}${v.status==='done'&&v.analysis_stride?` · sampled 1/${v.analysis_stride} frames`:''}</button>`).join('');
 }
 async function loadLibrary(){
- const response=await fetch('/api/videos');
+ const response=await fetch(apiUrl('/api/videos'));
  if(!response.ok)throw new Error('Could not load the backend video library.');
  const videos=await response.json();renderLibrary(videos);
  if(!S.video){const latestDone=videos.find(video=>video.status==='done');if(latestDone)await selectVideo(latestDone.id)}
 }
 loadSystemPerformance();setInterval(loadSystemPerformance,2500);
-fetch('/api/health').then(r=>{if(!r.ok)throw new Error('health request failed');S.backendOnline=true;$('#pb').className='pill ok';$('#pb').innerHTML='<i></i>BACKEND: ONLINE';analyzeButton.disabled=!S.video||!S.video.id;return loadLibrary()}).catch(()=>{$('#pb').className='pill bad';$('#pb').innerHTML='<i></i>BACKEND: OFFLINE';log('Backend /api/health or video library unavailable. Analysis disabled.')});
+fetch(apiUrl('/api/health')).then(r=>{if(!r.ok)throw new Error('health request failed');S.backendOnline=true;$('#pb').className='pill ok';$('#pb').innerHTML='<i></i>BACKEND: ONLINE';analyzeButton.disabled=!S.video||!S.video.id;return loadLibrary()}).catch(()=>{$('#pb').className='pill bad';$('#pb').innerHTML='<i></i>BACKEND: OFFLINE';log('Backend /api/health or video library unavailable. Analysis disabled.')});
 
 /* ---------- Video workspace (real local playback) ---------- */
 const vp=$('#vp'),drop=$('#drop'),fi=$('#fi');
@@ -294,12 +320,12 @@ async function load(f){if(!f)return;if(!f.type.startsWith('video/')){log('Reject
  if(S.video&&S.video.url)URL.revokeObjectURL(S.video.url);
  if(S.pollTimer){clearTimeout(S.pollTimer);S.pollTimer=null}
  const video={name:f.name,file:f,url:URL.createObjectURL(f)};S.video=video;
- vp.src=video.url;analyzeButton.disabled=true;analyzeButton.textContent='Run analysis';setAnalysisStatus('Uploading video to backend…');$('#ve').style.display='none';clearAnalysisData();
+ vp.src=video.url;pdfButton.disabled=true;analyzeButton.disabled=true;analyzeButton.textContent='Run analysis';setAnalysisStatus('Uploading video to backend…');$('#ve').style.display='none';clearAnalysisData();
  $('#lib').innerHTML=`<div class="pill" style="display:block;overflow:hidden;text-overflow:ellipsis">${f.name.replace(/</g,'&lt;')}</div>`;
  $('#pv').textContent='SESSION: '+f.name;log('Loaded '+f.name+' ('+(f.size/1048576).toFixed(1)+' MB). Uploading to backend…');
  try{
   const form=new FormData();form.append('file',f);
-  const response=await fetch('/api/videos',{method:'POST',body:form});
+  const response=await fetch(apiUrl('/api/videos'),{method:'POST',body:form});
   const result=await response.json();
   if(!response.ok)throw new Error(result.detail||'Video upload failed.');
   if(S.video!==video)return;
@@ -314,9 +340,9 @@ async function load(f){if(!f)return;if(!f.type.startsWith('video/')){log('Reject
 }
 analyzeButton.onclick=async()=>{
  const video=S.video;if(!video||!video.id||!S.backendOnline)return;
- analyzeButton.disabled=true;setAnalysisStatus('Queueing analysis…');
+ pdfButton.disabled=true;analyzeButton.disabled=true;setAnalysisStatus('Queueing analysis…');
  try{
-  const response=await fetch(`/api/videos/${video.id}/analyze`,{method:'POST'});
+  const response=await fetch(apiUrl(`/api/videos/${video.id}/analyze`),{method:'POST'});
   const result=await response.json();
   if(!response.ok)throw new Error(result.detail||'Could not start analysis.');
   setAnalysisStatus('Analysis queued. Waiting for the pipeline…');log('Analysis queued for video #'+video.id+'.');
@@ -328,17 +354,18 @@ analyzeButton.onclick=async()=>{
 };
 async function pollAnalysis(id){
  try{
-  const response=await fetch(`/api/videos/${id}`);
+  const response=await fetch(apiUrl(`/api/videos/${id}`));
   if(!response.ok)throw new Error('Could not read analysis status.');
   const result=await response.json();
-  if(S.video&&S.video.id===id){S.video.fps=result.fps;S.video.analysis_stride=result.analysis_stride}
+  if(S.video&&S.video.id===id){S.video.fps=result.fps;S.video.analysis_stride=result.analysis_stride;S.video.status=result.status}
   loadLibrary().catch(error=>log('Could not refresh backend video library: '+error.message));
   if(S.video&&S.video.id===id){
    if(result.status==='done'){
+    pdfButton.disabled=false;
     setAnalysisStatus('Analysis complete. Loading detections…');
     await renderAnalysisData(id);setAnalysisStatus(`Analysis complete. Results loaded; sampled 1/${result.analysis_stride||1} source frames.`);analyzeButton.disabled=false;loadFrameDetections(true);log('Analysis complete for video #'+id+'.');return
    }
-   if(result.status==='failed'){const reason=result.error||'Unknown pipeline error.';setAnalysisStatus('Analysis failed: '+reason);analyzeButton.disabled=false;log('Analysis failed: '+reason);return}
+   if(result.status==='failed'){pdfButton.disabled=true;const reason=result.error||'Unknown pipeline error.';setAnalysisStatus('Analysis failed: '+reason);analyzeButton.disabled=false;log('Analysis failed: '+reason);return}
    setAnalysisStatus(result.status==='processing'?`${result.stage||'Processing'} · ${Math.round((result.progress||0)*100)}%`:'Analysis queued. Waiting for the pipeline…');
   }
   S.pollTimer=setTimeout(()=>pollAnalysis(id),2000);
@@ -348,21 +375,24 @@ async function pollAnalysis(id){
 }
 async function selectVideo(id){
  try{
-  const response=await fetch(`/api/videos/${id}`);
+  const response=await fetch(apiUrl(`/api/videos/${id}`));
   const video=await response.json();
   if(!response.ok)throw new Error(video.detail||'Could not load video status.');
   if(S.video&&S.video.url)URL.revokeObjectURL(S.video.url);
   if(S.pollTimer){clearTimeout(S.pollTimer);S.pollTimer=null}
-  S.video={id:video.id,name:video.name,duration:video.duration,fps:video.fps,analysis_stride:video.analysis_stride};
-  vp.src=`/api/videos/${id}/file`;$('#ve').style.display='none';$('#pv').textContent='SESSION: '+video.name;
+  S.video={id:video.id,name:video.name,duration:video.duration,fps:video.fps,analysis_stride:video.analysis_stride,status:video.status};
+  vp.src=apiUrl(`/api/videos/${id}/file`);$('#ve').style.display='none';$('#pv').textContent='SESSION: '+video.name;
   if(video.status==='done'){
+   pdfButton.disabled=false;
    analyzeButton.textContent='Run analysis again';analyzeButton.disabled=false;
    setAnalysisStatus('Analysis complete. Loading detections…');
    await renderAnalysisData(id);setAnalysisStatus(`Analysis complete. Results loaded; sampled 1/${video.analysis_stride||1} source frames.`);loadFrameDetections(true);
   }else if(video.status==='processing'){
+   pdfButton.disabled=true;
    analyzeButton.disabled=true;setAnalysisStatus(`${video.stage||'Processing'} · ${Math.round((video.progress||0)*100)}%`);
    pollAnalysis(id);
   }else{
+   pdfButton.disabled=true;
    analyzeButton.textContent='Run analysis';analyzeButton.disabled=!S.backendOnline;
    setAnalysisStatus(video.status==='failed'?'Analysis failed: '+(video.error||'Unknown pipeline error.'):'Video uploaded. Ready for analysis.');
    clearAnalysisData();
@@ -404,9 +434,9 @@ function clearAnalysisData(){
 }
 async function renderAnalysisData(id){
  const [response,eventResponse,memoryResponse,spatialResponse,anomalyResponse,evidenceResponse]=await Promise.all([
-  fetch(`/api/videos/${id}/tracks`),fetch(`/api/videos/${id}/events`),
-  fetch(`/api/videos/${id}/memory?offset=0&limit=50`),fetch(`/api/videos/${id}/spatial`),
-  fetch(`/api/videos/${id}/anomalies`),fetch(`/api/videos/${id}/evidence?offset=0&limit=30`)
+  fetch(apiUrl(`/api/videos/${id}/tracks`)),fetch(apiUrl(`/api/videos/${id}/events`)),
+  fetch(apiUrl(`/api/videos/${id}/memory?offset=0&limit=50`)),fetch(apiUrl(`/api/videos/${id}/spatial`)),
+  fetch(apiUrl(`/api/videos/${id}/anomalies`)),fetch(apiUrl(`/api/videos/${id}/evidence?offset=0&limit=30`))
  ]);
  if(!response.ok||!eventResponse.ok||!memoryResponse.ok||!spatialResponse.ok||!anomalyResponse.ok||!evidenceResponse.ok)throw new Error('Could not load detection, track, event, memory, spatial, anomaly, or evidence results.');
  const [tracks,events,memoryData,spatialData,anomalyData,evidenceData]=await Promise.all([response.json(),eventResponse.json(),memoryResponse.json(),spatialResponse.json(),anomalyResponse.json(),evidenceResponse.json()]);
@@ -450,7 +480,7 @@ function renderTrackEvents(events){
 }
 async function loadMemoryData(id,offset){
  try{
-  const response=await fetch(`/api/videos/${id}/memory?offset=${offset}&limit=50`);
+  const response=await fetch(apiUrl(`/api/videos/${id}/memory?offset=${offset}&limit=50`));
   const data=await response.json();
   if(!response.ok)throw new Error(data.detail||'Could not load temporal memory.');
   if(!S.video||S.video.id!==id)return;
@@ -461,7 +491,7 @@ async function loadMemoryData(id,offset){
 }
 async function loadEvidenceData(id,offset){
  try{
-  const response=await fetch(`/api/videos/${id}/evidence?offset=${offset}&limit=30`);
+  const response=await fetch(apiUrl(`/api/videos/${id}/evidence?offset=${offset}&limit=30`));
   const data=await response.json();
   if(!response.ok)throw new Error(data.detail||'Could not load evidence items.');
   if(S.video&&S.video.id===id)renderEvidenceData(data);
@@ -475,7 +505,7 @@ function renderConfigRows(selector,rows){
 }
 async function loadConfiguration(){
  try{
-  const [configResponse,metricsResponse]=await Promise.all([fetch('/api/system/configuration'),fetch('/api/system')]);
+  const [configResponse,metricsResponse]=await Promise.all([fetch(apiUrl('/api/system/configuration')),fetch(apiUrl('/api/system'))]);
   const [config,metrics]=await Promise.all([configResponse.json(),metricsResponse.json()]);
   if(!configResponse.ok||!metricsResponse.ok)throw new Error(config.detail||metrics.detail||'Could not load system configuration.');
   renderConfigRows('#config-device',[
@@ -533,9 +563,9 @@ function renderEvidenceData(data){
   `<div class="sub" style="margin:6px 0">${item.observations.toLocaleString()} stored detections · ${fmt(item.start_t)}–${fmt(item.end_t)} · mean detector confidence ${Math.round((item.mean_conf||0)*100)}%</div>`+
   `<div class="sub">${escapeHtml(item.reasoning)}</div>`+
   `<div style="margin-top:8px"><button data-event-time="${item.start_t}">Seek to first observation · ${fmt(item.start_t)}</button> `+
-  `<a href="${item.frames[0].url}" target="_blank" rel="noopener">Open first source frame</a> `+
+  `<a href="${apiUrl(item.frames[0].url)}" target="_blank" rel="noopener">Open first source frame</a> `+
   `<button data-event-time="${item.end_t}">Seek to last observation · ${fmt(item.end_t)}</button> `+
-  `<a href="${item.frames[1].url}" target="_blank" rel="noopener">Open last source frame</a></div></div>`
+  `<a href="${apiUrl(item.frames[1].url)}" target="_blank" rel="noopener">Open last source frame</a></div></div>`
  ).join(''):NO('No stored detection observations are available for this video.');
  const previous=Math.max(0,data.offset-data.limit),next=data.offset+data.limit;
  $('#evidence-pagination').innerHTML=`<button type="button" data-evidence-offset="${previous}" ${data.offset===0?'disabled':''}>Previous</button> `+
@@ -616,40 +646,68 @@ function renderSpatialPlots(data){
 addEventListener('resize',()=>{if(S.spatialData)renderSpatialPlots(S.spatialData)});
 async function loadAnomalyData(id){
  try{
-  const response=await fetch(`/api/videos/${id}/anomalies`);
+  const response=await fetch(apiUrl(`/api/videos/${id}/anomalies`));
   const data=await response.json();
   if(!response.ok)throw new Error(data.detail||'Could not load anomaly candidates.');
   if(S.video&&S.video.id===id)renderAnomalies(data);
  }catch(error){if(S.video&&S.video.id===id)$('#anomaly-method').textContent='Anomaly data unavailable: '+error.message}
 }
 function renderAnomalies(data){
- $('#anomaly-method').textContent=`Method: ${data.method} Coordinates are ${data.coordinate_space}. Review flags manually; they are not scene-level conclusions.`;
+ $('#anomaly-method').textContent=`Statistical: ${data.method} Model: ${data.model_method} Coordinates are ${data.coordinate_space}. Review flags manually; they are not scene-level conclusions.`;
  const candidates=data.candidates||[];
  const modelCandidates=data.model_candidates||[];
+ const eligibility=data.eligibility||{minimum_observations_per_track:8,classes:[]};
+ const emptyAnomalies=(title,message)=>`<div class="empty"><em>${escapeHtml(title)}</em>${escapeHtml(message)}</div>`;
+ const eligibilityMessage=minimumTracks=>{
+  if(!eligibility.classes.length)return 'No tracked objects are available for this video.';
+  const nearest=[...eligibility.classes]
+   .sort((a,b)=>(b.qualifying_tracks-a.qualifying_tracks)||(b.tracks-a.tracks))
+   .slice(0,4)
+   .map(item=>`${item.cls}: ${item.qualifying_tracks}/${minimumTracks} qualifying tracks`)
+   .join('; ');
+  return `No candidate met the threshold of ${minimumTracks} tracks per class with at least ${eligibility.minimum_observations_per_track} observations each. Current closest classes: ${nearest}.`;
+ };
  const actions=candidate=>candidate.review_status==='pending'
   ?`<button data-anomaly-review="${candidate.id}" data-review-status="confirmed">Confirm</button> <button data-anomaly-review="${candidate.id}" data-review-status="dismissed">Dismiss</button>`
   :`<span class="pill">${escapeHtml(candidate.review_status)}</span>`;
+ const sampleNote=candidate=>candidate.class_track_count
+  ?` · ${candidate.class_track_count} qualifying class tracks${candidate.class_track_count<8?' · LOW SAMPLE SUPPORT':''}`
+  :'';
  $('#statistical-anomalies').innerHTML=candidates.length?candidates.map(candidate=>{
   return `<div class="card" style="margin:8px 0"><b>Image-plane high-speed outlier · Track #${candidate.track_id} ${escapeHtml(candidate.cls)}</b>`+
-   `<div class="sub" style="margin:6px 0">Robust z-score ${candidate.robust_z.toFixed(1)} · track median ${candidate.median_speed_px_s.toFixed(1)} px/s · class median ${candidate.class_median_px_s.toFixed(1)} px/s · peak segment ${candidate.peak_segment_px_s.toFixed(1)} px/s · ${candidate.observations} observations</div>`+
+   `<div class="sub" style="margin:6px 0">Exploratory robust z-score ${candidate.robust_z.toFixed(1)}${sampleNote(candidate)} · track median ${candidate.median_speed_px_s.toFixed(1)} px/s · class median ${candidate.class_median_px_s.toFixed(1)} px/s · peak segment ${candidate.peak_segment_px_s.toFixed(1)} px/s · ${candidate.observations} observations</div>`+
    `<button data-event-time="${candidate.start_t}">View evidence · ${fmt(candidate.start_t)}–${fmt(candidate.end_t)}</button> ${actions(candidate)}`+
    (candidate.review_note?`<div class="sub" style="margin-top:5px">${escapeHtml(candidate.review_note)}</div>`:'')+`</div>`;
- }).join(''):NO('No candidates met the detector’s minimum-data and within-class high-speed criteria for this video.');
+ }).join(''):emptyAnomalies('NO STATISTICAL OUTLIERS',eligibilityMessage(eligibility.statistical_minimum_tracks_per_class||8));
  $('#model-candidates').innerHTML=data.model_configured
   ?modelCandidates.length?modelCandidates.map(candidate=>
    `<div class="card" style="margin:8px 0"><b>${escapeHtml(data.model_name)} candidate · Track #${candidate.track_id} ${escapeHtml(candidate.cls)}</b>`+
-   `<div class="sub" style="margin:6px 0">Within-class anomaly score ${candidate.anomaly_score.toFixed(4)} (not a probability) · median speed ${candidate.median_speed_px_s.toFixed(1)} px/s · peak segment ${candidate.peak_segment_px_s.toFixed(1)} px/s · ${candidate.observations} observations</div>`+
+   `<div class="sub" style="margin:6px 0">Exploratory within-class score ${candidate.anomaly_score.toFixed(4)} (not a probability)${sampleNote(candidate)} · median speed ${candidate.median_speed_px_s.toFixed(1)} px/s · peak segment ${candidate.peak_segment_px_s.toFixed(1)} px/s · ${candidate.observations} observations</div>`+
    `<button data-event-time="${candidate.start_t}">View evidence · ${fmt(candidate.start_t)}–${fmt(candidate.end_t)}</button> ${actions(candidate)}`+
    (candidate.review_note?`<div class="sub" style="margin-top:5px">${escapeHtml(candidate.review_note)}</div>`:'')+`</div>`
   ).join('')
-  :NO(`${data.model_name} found no outlier candidates in classes with enough tracks.`)
-  :NO('No anomaly model is configured.');
+  :emptyAnomalies('NO MODEL CANDIDATES',eligibilityMessage(eligibility.model_minimum_tracks_per_class||12))
+  :emptyAnomalies('MODEL NOT CONFIGURED','No anomaly model is configured.');
  const reviewed=[...candidates.map(candidate=>({...candidate,review_source:'Statistical'})),
   ...modelCandidates.map(candidate=>({...candidate,review_source:data.model_name||'Model'}))]
   .filter(candidate=>candidate.review_status!=='pending');
- $('#human-reviewed').innerHTML=reviewed.length
-  ?reviewed.map(candidate=>`<div class="sub" style="margin:6px 0">${escapeHtml(candidate.review_status)} · ${escapeHtml(candidate.review_source)} · Track #${candidate.track_id} ${escapeHtml(candidate.cls)} · ${fmt(candidate.start_t)}–${fmt(candidate.end_t)}</div>`).join('')
-  :NO('No candidates have been reviewed yet. Use Confirm or Dismiss above to record a human review.');
+ const pending=[...candidates.map(candidate=>({...candidate,review_source:'Statistical'})),
+  ...modelCandidates.map(candidate=>({...candidate,review_source:data.model_name||'Model'}))]
+  .filter(candidate=>candidate.review_status==='pending');
+ const pendingHtml=pending.length
+  ?`<h4 style="margin:8px 0">AWAITING REVIEW · ${pending.length}</h4>`+
+   pending.map(candidate=>`<div class="card" style="margin:8px 0"><b>${escapeHtml(candidate.review_source)} · Track #${candidate.track_id} ${escapeHtml(candidate.cls)}</b>`+
+    `<div class="sub" style="margin:6px 0">${fmt(candidate.start_t)}–${fmt(candidate.end_t)} · ${candidate.observations} observations${sampleNote(candidate)}</div>`+
+    `<button data-event-time="${candidate.start_t}">View evidence</button> ${actions(candidate)}`+
+    (candidate.review_note?`<div class="sub" style="margin-top:5px">${escapeHtml(candidate.review_note)}</div>`:'')+`</div>`).join('')
+  :'';
+ const reviewedHtml=reviewed.length
+  ?`<h4 style="margin:12px 0 6px">SAVED HUMAN DECISIONS · ${reviewed.length}</h4>`+
+   reviewed.map(candidate=>`<div class="sub" style="margin:6px 0">${escapeHtml(candidate.review_status)} · ${escapeHtml(candidate.review_source)} · Track #${candidate.track_id} ${escapeHtml(candidate.cls)} · ${fmt(candidate.start_t)}–${fmt(candidate.end_t)}${candidate.review_note?` · ${escapeHtml(candidate.review_note)}`:''}</div>`).join('')
+  :pending.length?`<div class="sub">No human decisions saved yet. Confirm or dismiss a pending flag above.</div>`:'';
+ $('#human-reviewed').innerHTML=pending.length||reviewed.length
+  ?pendingHtml+reviewedHtml
+  :emptyAnomalies('NO CANDIDATES TO REVIEW','This video produced no statistical or model candidates, so there is nothing to confirm or dismiss.');
 }
 async function loadFrameDetections(force){
  const video=S.video;
@@ -659,7 +717,7 @@ async function loadFrameDetections(force){
  S.lastDetectionFetch=now;
  const request=++S.detectionRequest,t=vp.currentTime;
  try{
-  const response=await fetch(`/api/videos/${video.id}/detections?t=${t.toFixed(3)}`);
+  const response=await fetch(apiUrl(`/api/videos/${video.id}/detections?t=${t.toFixed(3)}`));
   if(!response.ok)throw new Error('Could not load detections for this frame.');
   const rows=await response.json();
   if(request!==S.detectionRequest||S.video!==video)return;

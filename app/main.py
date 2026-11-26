@@ -1,21 +1,42 @@
 import math, re, shutil, threading, uuid
 from collections import defaultdict
+from datetime import datetime
+from io import BytesIO
 from statistics import median
 from pathlib import Path
+from xml.sax.saxutils import escape
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import RobustScaler
 from . import db, pipeline, system
-from .config import ALLOWED, ROOT, UPLOADS
+from .config import ALLOWED, CORS_ORIGINS, ROOT, UPLOADS
 
 app = FastAPI(title="NEMESIS-X")
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(CORS_ORIGINS),
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Range"],
+    )
 db.init()
 _lock = threading.Lock()   # one analysis at a time (GPU friendly)
+ANOMALY_MIN_OBSERVATIONS = 8
+STATISTICAL_MIN_TRACKS = 5
+MODEL_MIN_TRACKS = 5
+STATISTICAL_MIN_ROBUST_Z = 2.0
 
 def video(c, vid):
     r = c.execute("SELECT * FROM videos WHERE id=?", (vid,)).fetchone()
@@ -150,7 +171,7 @@ def motion_anomalies(c, vid):
         groups[(row["track_id"], row["cls"])].append(row)
     class_tracks = defaultdict(list)
     for (track_id, cls), points in groups.items():
-        if len(points) < 8:
+        if len(points) < ANOMALY_MIN_OBSERVATIONS:
             continue
         segments = []
         for before, after in zip(points, points[1:]):
@@ -162,7 +183,7 @@ def motion_anomalies(c, vid):
             class_tracks[cls].append((track_id, len(points), median([item[0] for item in segments]), segments))
     candidates = []
     for cls, tracks in class_tracks.items():
-        if len(tracks) < 8:
+        if len(tracks) < STATISTICAL_MIN_TRACKS:
             continue
         speeds = [track[2] for track in tracks]
         center = median(speeds)
@@ -172,7 +193,7 @@ def motion_anomalies(c, vid):
         scale = 1.4826 * mad
         for track_id, observations, speed, segments in tracks:
             score = (speed - center) / scale
-            if score < 3.5:
+            if score < STATISTICAL_MIN_ROBUST_Z:
                 continue
             peak_speed, start_t, end_t = max(segments, key=lambda item: item[0])
             slug = re.sub(r"[^a-z0-9]+", "-", cls.lower()).strip("-")
@@ -189,6 +210,7 @@ def motion_anomalies(c, vid):
                 "class_median_px_s": center,
                 "class_mad_px_s": mad,
                 "robust_z": score,
+                "class_track_count": len(tracks),
             })
     return sorted(candidates, key=lambda item: item["robust_z"], reverse=True)
 
@@ -203,7 +225,7 @@ def model_motion_anomalies(c, vid):
 
     class_tracks = defaultdict(list)
     for (track_id, cls), points in groups.items():
-        if len(points) < 8:
+        if len(points) < ANOMALY_MIN_OBSERVATIONS:
             continue
         segments = []
         for before, after in zip(points, points[1:]):
@@ -238,7 +260,7 @@ def model_motion_anomalies(c, vid):
 
     candidates = []
     for tracks in class_tracks.values():
-        if len(tracks) < 12:
+        if len(tracks) < MODEL_MIN_TRACKS:
             continue
         matrix = np.asarray([track["features"] for track in tracks], dtype=float)
         scaled = RobustScaler().fit_transform(matrix)
@@ -253,6 +275,7 @@ def model_motion_anomalies(c, vid):
             track.pop("features")
             track["type"] = "isolation_forest_motion_outlier"
             track["anomaly_score"] = float(score)
+            track["class_track_count"] = len(tracks)
             candidates.append(track)
     return sorted(candidates, key=lambda item: item["anomaly_score"], reverse=True)
 
@@ -261,20 +284,42 @@ def anomalies(vid: int):
     c = db.conn(); video(c, vid)
     candidates = motion_anomalies(c, vid)
     model_candidates = model_motion_anomalies(c, vid)
+    eligibility_rows = c.execute(
+        "SELECT cls,COUNT(*) tracks,SUM(CASE WHEN observations>=? THEN 1 ELSE 0 END) qualifying_tracks "
+        "FROM (SELECT cls,track_id,COUNT(*) observations FROM detections WHERE video_id=? "
+        "GROUP BY cls,track_id) GROUP BY cls ORDER BY qualifying_tracks DESC,tracks DESC,cls",
+        (ANOMALY_MIN_OBSERVATIONS, vid),
+    ).fetchall()
     reviews = {row["anomaly_id"]: dict(row) for row in c.execute(
         "SELECT anomaly_id,status,note,updated FROM anomaly_reviews WHERE video_id=?", (vid,)
     )}
+    review_summary = {"pending": 0, "confirmed": 0, "dismissed": 0}
     for candidate in candidates + model_candidates:
         review = reviews.get(candidate["id"])
         candidate["review_status"] = review["status"] if review else "pending"
         candidate["review_note"] = review["note"] if review else None
+        review_summary[candidate["review_status"]] += 1
     return {
         "video_id": vid,
-        "method": "Robust within-class high-speed outliers of per-track median image-plane centroid speed (MAD z-score >= 3.5; at least 8 observations and 8 tracks per class).",
+        "method": f"Exploratory robust within-class high-speed outliers of per-track median image-plane centroid speed (MAD z-score >= {STATISTICAL_MIN_ROBUST_Z}; at least {ANOMALY_MIN_OBSERVATIONS} observations per track and {STATISTICAL_MIN_TRACKS} tracks per class). Small cohorts can produce unstable flags.",
         "coordinate_space": "image-plane pixels per second; camera motion and tracking switches can cause outliers",
+        "eligibility": {
+            "minimum_observations_per_track": ANOMALY_MIN_OBSERVATIONS,
+            "statistical_minimum_tracks_per_class": STATISTICAL_MIN_TRACKS,
+            "model_minimum_tracks_per_class": MODEL_MIN_TRACKS,
+            "classes": [
+                {"cls": row["cls"], "tracks": row["tracks"],
+                 "qualifying_tracks": row["qualifying_tracks"]}
+                for row in eligibility_rows
+            ],
+        },
+        "review_summary": {
+            "total": len(candidates) + len(model_candidates),
+            **review_summary,
+        },
         "model_configured": True,
         "model_name": "Isolation Forest",
-        "model_method": "Deterministic unsupervised per-video, per-class fit on track speed, path efficiency, confidence, and observation-count features; at least 12 tracks per class. Scores are not probabilities.",
+        "model_method": f"Deterministic unsupervised per-video, per-class fit on track speed, path efficiency, confidence, and observation-count features; at least {ANOMALY_MIN_OBSERVATIONS} observations per track and {MODEL_MIN_TRACKS} tracks per class. Small cohorts have limited support; scores are not probabilities.",
         "candidates": candidates,
         "model_candidates": model_candidates,
     }
@@ -362,6 +407,312 @@ def evidence(vid: int, offset: int = Query(0, ge=0), limit: int = Query(30, ge=1
         ],
         "items": items,
     }
+
+@app.get("/api/videos/{vid}/report.pdf")
+def video_report(vid: int):
+    c = db.conn()
+    try:
+        r = video(c, vid)
+        if r["status"] != "done":
+            raise HTTPException(409, "A PDF report is available after video analysis completes.")
+
+        class_rows = c.execute(
+            "SELECT cls,COUNT(DISTINCT track_id) tracks,COUNT(*) observations,AVG(conf) mean_conf "
+            "FROM detections WHERE video_id=? GROUP BY cls ORDER BY tracks DESC,observations DESC",
+            (vid,),
+        ).fetchall()
+        track_count = c.execute(
+            "SELECT COUNT(*) FROM (SELECT track_id,cls FROM detections WHERE video_id=? GROUP BY track_id,cls)",
+            (vid,),
+        ).fetchone()[0]
+        detection_count = c.execute(
+            "SELECT COUNT(*) FROM detections WHERE video_id=?", (vid,),
+        ).fetchone()[0]
+        track_rows = c.execute(
+            "SELECT track_id,cls,COUNT(*) observations,MIN(t) first_t,MAX(t) last_t,AVG(conf) mean_conf "
+            "FROM detections WHERE video_id=? GROUP BY track_id,cls "
+            "ORDER BY observations DESC,track_id LIMIT 25",
+            (vid,),
+        ).fetchall()
+        review_rows = c.execute(
+            "SELECT anomaly_id,status,note FROM anomaly_reviews WHERE video_id=?", (vid,),
+        ).fetchall()
+        reviews = {row["anomaly_id"]: dict(row) for row in review_rows}
+        statistical_candidates = motion_anomalies(c, vid)
+        model_candidates = model_motion_anomalies(c, vid)
+        summary = _video_answer(c, r, "Summarize this video")["answer"]
+
+        def format_time(value):
+            return _clock(float(value or 0))
+
+        duration = float(r["duration"] or 0)
+        candidate_list = sorted(
+            [(candidate, reviews.get(candidate["id"], {}))
+             for candidate in statistical_candidates + model_candidates],
+            key=lambda item: item[0]["start_t"],
+        )
+        review_counts = {
+            status: sum(review.get("status", "pending") == status for _, review in candidate_list)
+            for status in ("pending", "confirmed", "dismissed")
+        }
+        incident_assessment = (
+            "Not classified. The backend does not determine whether an incident occurred. "
+            "A reviewed motion flag is not confirmation of an incident."
+        )
+        entity_summary = (
+            ", ".join(
+                f"{row['tracks']} {_plural_class(row['cls'], row['tracks'])}"
+                for row in class_rows
+            )
+            if class_rows else "No tracked objects were recorded."
+        )
+
+        activity_segments = []
+        if duration > 0:
+            for index in range(3):
+                start = index * duration / 3
+                end = duration if index == 2 else (index + 1) * duration / 3
+                comparison = "t<=?" if index == 2 else "t<?"
+                counts = c.execute(
+                    "SELECT COUNT(*) observations,COUNT(DISTINCT track_id) tracks "
+                    f"FROM detections WHERE video_id=? AND t>=? AND {comparison}",
+                    (vid, start, end),
+                ).fetchone()
+                classes = c.execute(
+                    "SELECT cls,COUNT(*) observations FROM detections "
+                    f"WHERE video_id=? AND t>=? AND {comparison} "
+                    "GROUP BY cls ORDER BY observations DESC LIMIT 3",
+                    (vid, start, end),
+                ).fetchall()
+                activity_segments.append({
+                    "start": start, "end": end,
+                    "observations": counts["observations"], "tracks": counts["tracks"],
+                    "classes": ", ".join(row["cls"] for row in classes) or "None",
+                })
+        busiest_segment = max(activity_segments, key=lambda item: item["observations"], default=None)
+        activity_summary = (
+            f"Highest observation volume: {format_time(busiest_segment['start'])} to "
+            f"{format_time(busiest_segment['end'])} "
+            f"({busiest_segment['observations']:,} observations). "
+            "The timeline below divides the clip into thirds; these are not incident boundaries."
+            if busiest_segment and busiest_segment["observations"]
+            else "No tracked observations were recorded in the video timeline."
+        )
+        if candidate_list:
+            candidate_times = ", ".join(
+                f"{format_time(candidate['start_t'])} "
+                f"(track #{candidate['track_id']} {candidate['cls']})"
+                for candidate, _ in candidate_list[:5]
+            )
+            candidate_summary = (
+                f"{len(candidate_list)} motion review flag(s): {review_counts['pending']} pending, "
+                f"{review_counts['confirmed']} marked confirmed, and {review_counts['dismissed']} "
+                f"dismissed by a reviewer. Earliest flags include {candidate_times}. "
+                "These statuses apply to motion flags, not to an incident."
+            )
+        else:
+            candidate_summary = (
+                "No motion review flags met the configured criteria. This does not establish "
+                "that no incident occurred."
+            )
+
+        styles = getSampleStyleSheet()
+        styles.add(ParagraphStyle(
+            name="ReportTitle", parent=styles["Title"], fontName="Helvetica-Bold",
+            fontSize=20, leading=24, alignment=TA_CENTER, textColor=colors.HexColor("#14324A"),
+            spaceAfter=4,
+        ))
+        styles.add(ParagraphStyle(
+            name="ReportSubtitle", parent=styles["Normal"], fontSize=9, leading=12,
+            alignment=TA_CENTER, textColor=colors.HexColor("#526477"), spaceAfter=14,
+        ))
+        styles.add(ParagraphStyle(
+            name="SectionHeading", parent=styles["Heading2"], fontName="Helvetica-Bold",
+            fontSize=12, leading=15, textColor=colors.HexColor("#087E8B"),
+            spaceBefore=10, spaceAfter=6, keepWithNext=True,
+        ))
+        styles.add(ParagraphStyle(
+            name="ReportBody", parent=styles["BodyText"], fontSize=9, leading=13,
+            spaceAfter=4,
+        ))
+        styles.add(ParagraphStyle(
+            name="ReportSmall", parent=styles["BodyText"], fontSize=8, leading=10,
+        ))
+
+        def paragraph(value, style="ReportBody"):
+            safe_text = escape(str(value).encode("cp1252", "replace").decode("cp1252"))
+            return Paragraph(safe_text, styles[style])
+
+        def report_table(rows, widths, header=True):
+            formatted = [
+                [paragraph(cell, "ReportSmall") for cell in row]
+                for row in rows
+            ]
+            table = Table(formatted, colWidths=widths, repeatRows=1 if header else 0, hAlign="LEFT")
+            commands = [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#D7E0E7")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+            if header:
+                commands.extend([
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF3F6")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#14324A")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ])
+            table.setStyle(TableStyle(commands))
+            return table
+
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm,
+            topMargin=18 * mm, bottomMargin=18 * mm,
+            title=f"NEMESIS-X Analysis Report - Video {vid}",
+            author="NEMESIS-X",
+        )
+        story = [
+            paragraph("NEMESIS-X", "ReportTitle"),
+            paragraph("VIDEO ANALYSIS REPORT", "ReportSubtitle"),
+            paragraph("Overall incident summary", "SectionHeading"),
+            report_table([
+                ["Assessment area", "Summary"],
+                ["Incident determination", incident_assessment],
+                ["Observed activity", summary],
+                ["Tracked entities", entity_summary],
+                ["Timeline activity", activity_summary],
+                ["Motion review flags", candidate_summary],
+            ], [42 * mm, 132 * mm]),
+            paragraph(
+                "This is an evidence summary of stored detector and tracking output, not an "
+                "official incident finding. Review the original footage before drawing conclusions.",
+                "ReportSmall",
+            ),
+            paragraph("Timeline overview", "SectionHeading"),
+            report_table(
+                [["Video interval", "Stored observations", "Distinct track IDs", "Most frequent labels"]]
+                + [
+                    [f"{format_time(segment['start'])} - {format_time(segment['end'])}",
+                     f"{segment['observations']:,}", f"{segment['tracks']:,}", segment["classes"]]
+                    for segment in activity_segments
+                ],
+                [38 * mm, 35 * mm, 38 * mm, 63 * mm],
+            ),
+            paragraph("Video and processing details", "SectionHeading"),
+            report_table([
+                ["Field", "Value"],
+                ["Video", r["name"] or f"Video {vid}"],
+                ["Video ID", vid],
+                ["Analysis status", r["status"]],
+                ["Duration", f"{float(r['duration'] or 0):.2f} seconds ({format_time(r['duration'])})"],
+                ["Resolution", f"{r['width']} x {r['height']}" if r["width"] and r["height"] else "Not available"],
+                ["Source frame rate", f"{float(r['fps']):.2f} FPS" if r["fps"] else "Not available"],
+                ["Analysis frame stride", r["analysis_stride"] or "Not available"],
+                ["Report generated", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")],
+            ], [42 * mm, 132 * mm]),
+            paragraph("Detection and object-class summary", "SectionHeading"),
+        ]
+
+        if class_rows:
+            class_data = [["Class", "Tracks", "Observations", "Mean confidence"]]
+            class_data.extend([
+                [row["cls"], row["tracks"], row["observations"],
+                 f"{float(row['mean_conf'] or 0):.1%}"]
+                for row in class_rows
+            ])
+            story.append(report_table(class_data, [45 * mm, 25 * mm, 45 * mm, 45 * mm]))
+        else:
+            story.append(paragraph("No tracked detections were recorded."))
+        story.append(paragraph(
+            f"Total: {detection_count:,} stored observations across {track_count:,} track/class records.",
+            "ReportSmall",
+        ))
+
+        story.append(paragraph("Most-observed tracks", "SectionHeading"))
+        if track_rows:
+            track_data = [["Track", "Class", "Observations", "First", "Last", "Mean conf."]]
+            track_data.extend([
+                [row["track_id"], row["cls"], row["observations"],
+                 format_time(row["first_t"]), format_time(row["last_t"]),
+                 f"{float(row['mean_conf'] or 0):.1%}"]
+                for row in track_rows
+            ])
+            story.append(report_table(
+                track_data, [16 * mm, 31 * mm, 29 * mm, 24 * mm, 24 * mm, 36 * mm],
+            ))
+            if track_count > len(track_rows):
+                story.append(paragraph(
+                    f"Showing the {len(track_rows)} tracks with the most observations out of "
+                    f"{track_count:,}; class totals above include all tracks.",
+                    "ReportSmall",
+                ))
+        else:
+            story.append(paragraph("No tracks are available for this video."))
+
+        story.append(paragraph("Motion review candidates", "SectionHeading"))
+        candidate_data = [["Source", "Track / class", "Time range", "Review", "Score / note"]]
+        for source, candidates, score_key in (
+            ("Statistical", statistical_candidates, "robust_z"),
+            ("Isolation Forest", model_candidates, "anomaly_score"),
+        ):
+            for candidate in candidates:
+                review = reviews.get(candidate["id"], {})
+                score = candidate.get(score_key)
+                score_label = f"Score {float(score):.3f}" if score is not None else "Score unavailable"
+                if review.get("note"):
+                    score_label += f"; {review['note']}"
+                candidate_data.append([
+                    source,
+                    f"#{candidate['track_id']} {candidate['cls']}",
+                    f"{format_time(candidate['start_t'])} - {format_time(candidate['end_t'])}",
+                    review.get("status", "pending"),
+                    score_label,
+                ])
+        if len(candidate_data) > 1:
+            story.append(report_table(
+                candidate_data, [29 * mm, 36 * mm, 34 * mm, 24 * mm, 37 * mm],
+            ))
+        else:
+            story.append(paragraph("No motion review candidates were produced for this video."))
+        story.append(paragraph(
+            "Statistical flags are within-class image-plane speed outliers. Isolation Forest "
+            "scores are model outputs, not probabilities. Only candidates explicitly marked "
+            "confirmed or dismissed have a recorded human review.",
+            "ReportSmall",
+        ))
+
+        story.append(paragraph("Interpretation and evidence limitations", "SectionHeading"))
+        limitations = [
+            "Detector labels and track IDs are model outputs, not verified identities or scene-level events.",
+            "Track IDs are local to this video and may change after occlusion or tracking errors.",
+            "Coordinates and motion cues are image-plane measurements; physical distance, depth, and real-world speed are unavailable.",
+            "Camera motion, perspective, and tracker switches can produce motion outliers.",
+            "These data do not establish impact, injury, intent, causation, or that a crime or collision occurred.",
+            "Analysis samples frames according to the configured stride, so events between sampled frames may be missed.",
+        ]
+        story.extend(paragraph(f"- {item}", "ReportSmall") for item in limitations)
+
+        def draw_page(canvas, document):
+            canvas.saveState()
+            canvas.setStrokeColor(colors.HexColor("#D7E0E7"))
+            canvas.line(18 * mm, 13 * mm, A4[0] - 18 * mm, 13 * mm)
+            canvas.setFont("Helvetica", 8)
+            canvas.setFillColor(colors.HexColor("#526477"))
+            canvas.drawString(18 * mm, 9 * mm, f"NEMESIS-X | Video {vid}")
+            canvas.drawRightString(A4[0] - 18 * mm, 9 * mm, f"Page {document.page}")
+            canvas.restoreState()
+
+        doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
+        filename = f"nemesis-x-video-{vid}-report.pdf"
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    finally:
+        c.close()
 
 class Q(BaseModel):
     question: str
